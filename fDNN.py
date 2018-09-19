@@ -27,14 +27,7 @@ y_test = label_vec[cutpoint:]
 
 ## RF part
 n_trees = 400
-tree_depth = 3
-max_nodes = 2**(tree_depth+1)-1
-rf = RandomForestClassifier(n_estimators=n_trees, n_jobs=-1,
-                            bootstrap=False,
-                            max_features=20,
-                            min_samples_split=60,
-                            max_depth=tree_depth
-                            )
+rf = RandomForestClassifier(n_estimators=n_trees, n_jobs=-1)
 rf.fit(expression_train, y_train)
 acc_rf = 1 - sum(abs(rf.predict(expression_test)-y_test))/len(y_test)
 
