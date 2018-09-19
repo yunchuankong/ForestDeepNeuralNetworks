@@ -8,23 +8,40 @@ from random import seed
 import sys
 import time
 
+## timer
+start_time = time.time()
+
 tf.reset_default_graph()
 file = sys.argv[1]
+out_path = sys.argv[2]
 expression = np.loadtxt(file, dtype=float, delimiter=",", skiprows=1)
 label_vec = np.array(expression[:,-1], dtype=int)
 expression = np.array(expression[:,:-1])
 
-cutpoint = 500
-expression, label_vec = shuffle(expression, label_vec) ## different here from rfnn.py
+cutpoint = 700
+# expression, label_vec = shuffle(expression, label_vec) 
 expression_train = expression[:cutpoint, :]
 expression_test = expression[cutpoint:, :]
 y_train = label_vec[:cutpoint]
 y_test = label_vec[cutpoint:]
 
 ## RF part
-n_trees = 300
-rf = RandomForestClassifier(n_estimators=n_trees, n_jobs=-1)
+n_trees = 400
+tree_depth = 3
+max_nodes = 2**(tree_depth+1)-1
+rf = RandomForestClassifier(n_estimators=n_trees, n_jobs=-1,
+                            bootstrap=False,
+                            max_features=20,
+                            min_samples_split=60,
+                            max_depth=tree_depth
+                            )
 rf.fit(expression_train, y_train)
+acc_rf = 1 - sum(abs(rf.predict(expression_test)-y_test))/len(y_test)
+
+imp_mat = np.zeros([np.shape(expression_train)[1], n_trees])
+for i in range(n_trees):
+    imp_mat[:,i] = rf.estimators_[i].feature_importances_
+# print(np.shape(imp_mat))
 
 x_total = [tree.predict(expression) for tree in rf.estimators_]
 x_total = np.transpose(x_total)
@@ -55,12 +72,16 @@ labels = np.array(labels,dtype=int)
 
 y_train = labels[:cutpoint, :]
 y_test = labels[cutpoint:, :]
+auc_rf = metrics.roc_auc_score(y_test, rf.predict_proba(expression_test))
 
 ## hyper-parameters and settings
-L2 = True
+L2 = True ## L2 is necessary for rfnn
 droph1 = False
 learning_rate = 0.0001
+# learning_rate2 = 0.0001
 training_epochs = 200
+# trials = 1
+# test_prop = 0.2
 batch_size = 8
 display_step = 1
 
@@ -93,6 +114,9 @@ def multilayer_perceptron(x, weights, biases, keep_prob):
     layer_2 = tf.nn.dropout(layer_2, keep_prob=keep_prob)
 
     layer_3 = tf.add(tf.matmul(layer_2, weights['h3']), biases['b3'])
+    ## Do not use batch-norm
+    # layer_3 = tf.contrib.layers.batch_norm(layer_3, center=True, scale=True,
+    #                                   is_training=is_training)
     layer_3 = tf.nn.relu(layer_3)
     layer_3 = tf.nn.dropout(layer_3, keep_prob=keep_prob)
 
@@ -107,7 +131,9 @@ def multilayer_perceptron(x, weights, biases, keep_prob):
 x = tf.placeholder(tf.float32, [None, n_features, 2])
 y = tf.placeholder(tf.int32, [None, n_classes])
 keep_prob = tf.placeholder(tf.float32)
+# is_training = tf.placeholder(tf.bool)
 lr = tf.placeholder(tf.float32)
+tree_feature_table = tf.placeholder(tf.float32, [np.shape(expression_train)[1], n_trees])
 
 weights = {
     'h1': tf.Variable(tf.truncated_normal(shape=[2, n_features, n_hidden_1], stddev=0.1)),
@@ -142,6 +168,12 @@ correct_prediction = tf.equal(tf.argmax(pred, 1), tf.argmax(y, 1))
 accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
 y_score = tf.nn.softmax(logits=pred)
 
+
+tree_importance = tf.reduce_sum(tf.reshape(tf.abs(weights['h1'][1]),[n_features, n_hidden_1]), 1)
+tree_importance = tree_importance / tf.reduce_sum(tree_importance)
+variable_importance = tf.matmul(tree_feature_table, tf.expand_dims(tree_importance, 1))
+
+
 with tf.Session() as sess:
 
     sess.run(tf.global_variables_initializer())
@@ -158,10 +190,17 @@ with tf.Session() as sess:
         for i in range(total_batch-1):
             batch_x, batch_y = x_tmp[i*batch_size:i*batch_size+batch_size], \
                                 y_tmp[i*batch_size:i*batch_size+batch_size]
+
+            # if epoch <= 69:
             _, c= sess.run([optimizer, cost], feed_dict={x: batch_x, y: batch_y,
                                                         keep_prob: 0.9,
                                                         lr: learning_rate
                                                         })
+            # else:
+            #     _, c= sess.run([optimizer, cost], feed_dict={x: batch_x, y: batch_y,
+            #                                                 keep_prob: 0.9,
+            #                                                 lr: learning_rate2
+            #                                                 })
             # Compute average loss
             avg_cost += c / total_batch
 
@@ -171,17 +210,28 @@ with tf.Session() as sess:
         ## Display logs per epoch step
         if epoch % display_step == 0:
             loss_rec[epoch] = avg_cost
+            # print ("Epoch:", '%d' % (epoch+1), "cost=", "{:.9f}".format(avg_cost))
             acc, y_s = sess.run([accuracy, y_score], feed_dict={x: x_train, y: y_train, keep_prob: 1})
             auc = metrics.roc_auc_score(y_train, y_s)
             training_eval[epoch] = [acc, auc]
             print ("Epoch:", '%d' % (epoch+1), "cost =", "{:.9f}".format(avg_cost),
                     "Training accuracy:", round(acc,3), " Training auc:", round(auc,3))
-        if avg_cost <= 0.01:
-            print("Early stopping.")
+        if avg_cost <= 0.27:
+            # print("Early stopping.")
             break
 
     ## Testing cycle
     acc, y_s = sess.run([accuracy, y_score], feed_dict={x: x_test, y: y_test, keep_prob: 1})
     auc = metrics.roc_auc_score(y_test, y_s)
-    print("*****=====", "Testing accuracy: ", acc, " Testing auc: ", auc, "=====*****")
+    # print("*****=====", "Testing accuracy: ", acc, " Testing auc: ", auc, "=====*****")
+    print(auc)
+    print(auc_rf)
 
+    var_imp = sess.run([variable_importance], feed_dict={tree_feature_table: imp_mat})
+    var_imp = np.reshape(var_imp, [np.shape(expression_train)[1]])
+    # var_imp = np.argsort(var_imp)[::-1]
+    # print((var_imp[:100] < n_true_predictors).sum() / float(n_true_predictors))
+
+    np.savetxt(out_path+file.split("/")[-1].split(".")[0]+"_var_imp_fDNN.csv", var_imp, delimiter=",")
+
+print("Total time used: %s seconds " % (time.time() - start_time) )
